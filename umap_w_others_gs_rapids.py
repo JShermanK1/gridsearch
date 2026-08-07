@@ -30,7 +30,6 @@ import pathlib
 class ScPCA(skbase.TransformerMixin, skbase.BaseEstimator):
     def __init__(self, layer= None, n_comps= None, mask= None):
         self.layer = layer
-        self.n_comps = n_comps
         self.mask = mask
 
     def __sklearn_tags__(self):
@@ -45,7 +44,6 @@ class ScPCA(skbase.TransformerMixin, skbase.BaseEstimator):
     def transform(self, X):
         X = rsc.pp.pca(
             X,
-            n_comps= self.n_comps,
             layer= self.layer,
             copy= True
         )
@@ -71,6 +69,7 @@ class ScNeighbors(skbase.TransformerMixin, skbase.BaseEstimator):
             n_neighbors= self.n_neighbors,
             n_pcs= self.n_pcs,
         )
+        X.uns["n_pcs"] = self.n_pcs
         return X
     
 class ScLeiden(skbase.TransformerMixin, skbase.BaseEstimator):
@@ -107,7 +106,7 @@ class ScScore(skbase.TransformerMixin, skbase.BaseEstimator):
         return silhouette_score(
             X.obsm["X_pca"],
             labels= X.obs["leiden"].cat.codes,
-        ) * np.log10(X.obs["leiden"].nunique() + X.obsm["X_pca"].shape[0])
+        ) * np.log10(X.obs["leiden"].nunique() + X.uns["n_pcs"])
     
 
     
@@ -172,7 +171,7 @@ if __name__ == "__main__":
 
     analysis_layer = args.layer #None == "X"
 # %%
-    merged_data = sc.read_h5ad(args.anndata)
+    merged_data = sc.read_h5ad(args.anndata, backed= "r")
     # %%
     # %%
     rsc.get.anndata_to_GPU(merged_data, convert_all= True)
@@ -190,7 +189,7 @@ if __name__ == "__main__":
     scscorer = ScScore()
     workflow = pipe.make_pipeline(pca, neighbors, scleid, scscorer)
     param_grid = {
-        "scpca__n_comps": range(5, 25),
+        "scneighbors__n_pcs": range(5, 25),
         "scneighbors__n_neighbors": range(20, 50),
         "scleiden__resolution": np.linspace(1, 2, 20) 
     }
