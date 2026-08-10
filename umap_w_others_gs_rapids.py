@@ -6,13 +6,8 @@ import time
 
 import anndata as ann
 import colorcet as cc
-import cupy as cp
-import cupyx as cpx
-from cupyx.scipy.spatial.distance import pdist
 import joblib
 import numpy as np
-import rapids_singlecell as rsc
-import rmm
 import scanpy as sc
 import seaborn as sns
 import sklearn.base as skbase
@@ -20,16 +15,14 @@ import sklearn.metrics as skm
 import sklearn.model_selection as skms
 import sklearn.pipeline as pipe
 from matplotlib import pyplot as plt
-from rmm.allocators.cupy import rmm_cupy_allocator
 from sklearn.experimental import enable_halving_search_cv
 import scipy.spatial as sps
-from cuml.metrics.cluster import silhouette_score
 import argparse
 import pathlib
+from tempfile import TemporaryDirectory
 
 class ScPCA(skbase.TransformerMixin, skbase.BaseEstimator):
-    def __init__(self, layer= None, n_comps= None, mask= None):
-        self.layer = layer
+    def __init__(self, mask= None):
         self.mask = mask
 
     def __sklearn_tags__(self):
@@ -44,13 +37,13 @@ class ScPCA(skbase.TransformerMixin, skbase.BaseEstimator):
     def transform(self, X):
         X = rsc.pp.pca(
             X,
-            layer= self.layer,
-            copy= True
+            copy= True,
         )
+        X.X = None
         return X
 
 class ScNeighbors(skbase.TransformerMixin, skbase.BaseEstimator):
-    def __init__(self, n_neighbors= 15, n_pcs= None):
+    def __init__(self, n_neighbors= 15, n_pcs= 10):
         self.n_neighbors = n_neighbors
         self.n_pcs = n_pcs
 
@@ -104,7 +97,7 @@ class ScScore(skbase.TransformerMixin, skbase.BaseEstimator):
 
     def score(self, X, y= None, sample_weight= None):
         return silhouette_score(
-            X.obsm["X_pca"],
+            X.obsm["X_pca"][:, :X.uns["n_pcs"]],
             labels= X.obs["leiden"].cat.codes,
         ) * np.log10(X.obs["leiden"].nunique() + X.uns["n_pcs"])
     
@@ -112,6 +105,13 @@ class ScScore(skbase.TransformerMixin, skbase.BaseEstimator):
     
 
 if __name__ == "__main__":
+    import cupy as cp
+    import cupyx as cpx
+    from cupyx.scipy.spatial.distance import pdist
+    import rapids_singlecell as rsc
+    import rmm
+    from rmm.allocators.cupy import rmm_cupy_allocator
+    from cuml.metrics.cluster import silhouette_score
 
     rmm.reinitialize(
         pool_allocator= True,
@@ -171,7 +171,12 @@ if __name__ == "__main__":
 
     analysis_layer = args.layer #None == "X"
 # %%
-    merged_data = sc.read_h5ad(args.anndata, backed= "r")
+    merged_data = sc.read_h5ad(args.anndata)
+    merged_data = ann.AnnData(
+        X= merged_data.layers[args.layer],
+        obs= merged_data.obs[[]],
+        var= merged_data.var[[]],
+    )
     # %%
     # %%
     rsc.get.anndata_to_GPU(merged_data, convert_all= True)
@@ -179,37 +184,37 @@ if __name__ == "__main__":
     #distA = cp.ndarray(sample_size * (sample_size - 1) // 2, dtype= np.float32)
 
     # %%
-    print(merged_data)
+    with TemporaryDirectory() as tmpd:
     # %%
-    pca = ScPCA(
-        layer= analysis_layer,
-    )
-    neighbors = ScNeighbors()
-    scleid = ScLeiden()
-    scscorer = ScScore()
-    workflow = pipe.make_pipeline(pca, neighbors, scleid, scscorer)
-    param_grid = {
-        "scneighbors__n_pcs": range(5, 25),
-        "scneighbors__n_neighbors": range(20, 50),
-        "scleiden__resolution": np.linspace(1, 2, 20) 
-    }
-    X_train, X_test = skms.train_test_split(
-        merged_data,
-        test_size= 0.2,
-        random_state= 0,
-    )
+        pca = ScPCA()
+        neighbors = ScNeighbors()
+        scleid = ScLeiden()
+        scscorer = ScScore()
+        workflow = pipe.make_pipeline(
+            pca, neighbors, scleid, scscorer,
+            memory= tmpd,
+        )
+        param_grid = {
+            "scneighbors__n_pcs": range(5, 25),
+            "scneighbors__n_neighbors": range(20, 50),
+            "scleiden__resolution": np.linspace(1, 2, 20) 
+        }
+        X_train, X_test = skms.train_test_split(
+            merged_data,
+            test_size= 0.2,
+            random_state= 0,
+        )
 
-    workflow.score(merged_data)
+        workflow.score(merged_data)
 
-    # %%
+        # %%
 
-    grids = skms.HalvingGridSearchCV(
-        workflow,
-        param_grid= param_grid,
-        min_resources= X_train.n_obs // 3 ** (args.iterations - 1),
-    ) 
+        grids = skms.GridSearchCV(
+            workflow,
+            param_grid= param_grid,
+        ) 
 
-    grids.fit(merged_data)
+        grids.fit(merged_data)
 
     # %%
     grids.best_params_
@@ -229,7 +234,6 @@ if __name__ == "__main__":
     # %%
     sc.pp.pca(
         merged_data,
-        n_comps= grids.best_params_["scpca__n_comps"],
         layer= analysis_layer,
     )
 
@@ -245,6 +249,7 @@ if __name__ == "__main__":
     sc.pp.neighbors(
         merged_data,
         n_neighbors= grids.best_params_["scneighbors__n_neighbors"],
+        n_pcs= grids.best_params_["scneighbors__n_pcs"],
     )
     sc.tl.umap(
         merged_data,
