@@ -20,7 +20,7 @@ from matplotlib import pyplot as plt
 from sklearn.experimental import enable_halving_search_cv
 import scipy.spatial as sps
 from cuml.metrics.cluster import silhouette_score
-from cuml.decomposition import PCA
+from cuml.decomposition import (PCA, IncrementalPCA)
 from cuml.neighbors import NearestNeighbors
 import cugraph as cg
 import cupy as cp
@@ -35,23 +35,19 @@ class ScNeighbors(NearestNeighbors, skbase.TransformerMixin, skbase.BaseEstimato
         distance_list: DataFrame
         distance_list, neighbor_list = self.kneighbors()
         neighbor_list = neighbor_list.reset_index(
-            drop= True,
-        ).reset_index(
         ).melt(
             id_vars= "index",
             value_name= "destination",
         ).join(
-            distance_list.reset_index(
-                drop= True,
-            ).melt(
+            distance_list.melt(
                 value_name= "dist"
             )["dist"]
         )
         neighbor_list = neighbor_list[["index", "destination", "dist"]]
-        map = X.index.to_series().reset_index(drop= True)
-        neighbor_list["index"] = neighbor_list["index"].map(map)
-        neighbor_list["destination"] = neighbor_list["destination"].map(map)
-        return (neighbor_list, X)
+        # map = X.index.to_series().reset_index(drop= True)
+        # neighbor_list["index"] = neighbor_list["index"].map(map)
+        # neighbor_list["destination"] = neighbor_list["destination"].map(map)
+        return neighbor_list
 
     
 class ScLeiden(skbase.ClassifierMixin, skbase.BaseEstimator):
@@ -60,23 +56,23 @@ class ScLeiden(skbase.ClassifierMixin, skbase.BaseEstimator):
 
 
     def fit(self, X, y= None):
-        g = cg.from_cudf_edgelist(X[0], source= "index", edge_attr= "dist")
-        parts, _ = cg.leiden(
+        g = cg.from_cudf_edgelist(X, source= "index", edge_attr= "dist")
+        classes, _ = cg.leiden(
             g,
             resolution= self.resolution,
         )
-        self.classes_ = parts.set_index("vertex").join(X[1])
+        self.classes_ = classes.sort_values("vertex")["partition"]
         return self
     
     def predict(self, X, y= None):
         return self.classes_
 
     def score(self, X, y= None):
-        classes = self.classes_["partition"]
-        X = self.classes_.drop(columns= "partition")
+        # classes = self.classes_["partition"]
+        # X = self.classes_.drop(columns= "partition")
         return silhouette_score(
             X,
-            labels= classes,
+            labels= self.classes_,
         ) * cp.log10(X.shape[1])
 
         
@@ -109,6 +105,7 @@ if __name__ == "__main__":
 
     rng = np.random.default_rng(0)
 
+# %%
 
     os.makedirs(
         "figures",
@@ -180,6 +177,7 @@ if __name__ == "__main__":
     if args.prefix:
         args.prefix += "-"
 
+# %%
 
     cluster = LocalCUDACluster(
         protocol= "ucx",
@@ -194,36 +192,50 @@ if __name__ == "__main__":
         cluster,
     )   
 
-    if args.transpose:
-        merged_data = cdf.read_parquet(
-                args.anndata,
-            ).astype("float32")
-        merged_data = merged_data.T.copy(deep= True)
-    else:
-        merged_data = cdf.read_parquet(
-                args.anndata,
-            ).astype("float32")
+# %%
+    # if args.transpose:
+    #     merged_data = cdf.read_parquet(
+    #             args.anndata,
+    #         ).astype("float32").T.values
+    # else:
+    #     merged_data = cdf.read_parquet(
+    #             args.anndata,
+    #         ).astype("float32").values
     
 
     print("fitting gridsearch")
 
     n_components = np.linspace(*args.comp_limits, 21, dtype= int)
-    n_neighbors = itertools.cycle([np.linspace(*args.nn_limits, 21, dtype= int)])
-    resolution = itertools.cycle([np.linspace(*args.res_limits, 21)])
+    n_neighbors = np.linspace(*args.nn_limits, 21, dtype= int)
+    resolution = np.linspace(*args.res_limits, 21)
 
-    grid = list(zip(n_components, n_neighbors, resolution))
+# %%
+    grid = zip(
+        n_components, 
+        itertools.cycle([n_neighbors]), 
+        itertools.cycle([resolution])
+    )
     # %%
-    def score(params, data):
+    def score(params, file):
+        if args.transpose:
+            data = cdf.read_parquet(
+                    file,
+                ).astype("float32").T.values
+        else:
+            data = cdf.read_parquet(
+                    file,
+                ).astype("float32").values
         nn = params[1]
         r = params[2]
-        pca = PCA(
+        pca = IncrementalPCA(
             n_components= params[0]
         )
         X_pca = pca.fit_transform(data)
         scores = cp.empty((nn.shape[0], r.shape[0]))
         for i, n_neigh in enumerate(nn):
             scneighbors = ScNeighbors(
-                n_neighbors= n_neigh
+                n_neighbors= n_neigh,
+                output_type= "cudf",
             )
             X_neighbor = scneighbors.fit_transform(X_pca)
             for j, res in enumerate(r):
@@ -231,27 +243,29 @@ if __name__ == "__main__":
                     resolution= res
                 )
                 scleid.fit(X_neighbor)
-                scores[i, j] = scleid.score(X_neighbor)
+                scores[i, j] = scleid.score(X_pca)
         return scores
 
     with joblib.parallel_backend("dask"):
         result = joblib.Parallel(verbose= 100)(
-            joblib.delayed(score)(params, merged_data.copy(deep= False)) for params in grid
+            joblib.delayed(score)(params, args.anndata) for params in grid
         )
 
     result = np.array([
         arr.get() for arr in result
     ])
-
+    print("got result")
     idx = pd.MultiIndex.from_product(
         [n_components, n_neighbors, resolution],
         names= ["n_components", "n_neighbors", "resolution"]
     )
+    print("made index")
     grids_df = pd.Series(
         result.flat,
         index= idx,
         name= "score"
     ).to_frame(
     ).reset_index(
-    ).to_parquet(f"pickles/{args.prefix}dask")
+    ).to_parquet(f"pickles/{args.prefix}dask.parquet")
+    print("made parquet")
     # %%
