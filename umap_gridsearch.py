@@ -1,24 +1,11 @@
 # %%
-import glob
 import os
-import pickle
-import time
 from typing import Literal
-# os.environ["SCIPY_ARRAY_API"] = "1"
 
-import anndata as ann
-import colorcet as cc
 import numpy as np
 import pandas as pd
-import scanpy as sc
 import seaborn as sns
 import sklearn.base as skbase
-import sklearn.metrics as skm
-import sklearn.model_selection as skms
-import sklearn.pipeline as pipe
-from matplotlib import pyplot as plt
-from sklearn.experimental import enable_halving_search_cv
-import scipy.spatial as sps
 from cuml.metrics.cluster import silhouette_score
 from cuml.decomposition import (PCA, IncrementalPCA)
 from cuml.neighbors import NearestNeighbors
@@ -44,9 +31,6 @@ class ScNeighbors(NearestNeighbors, skbase.TransformerMixin, skbase.BaseEstimato
             )["dist"]
         )
         neighbor_list = neighbor_list[["index", "destination", "dist"]]
-        # map = X.index.to_series().reset_index(drop= True)
-        # neighbor_list["index"] = neighbor_list["index"].map(map)
-        # neighbor_list["destination"] = neighbor_list["destination"].map(map)
         return neighbor_list
 
     
@@ -68,8 +52,6 @@ class ScLeiden(skbase.ClassifierMixin, skbase.BaseEstimator):
         return self.classes_
 
     def score(self, X, y= None):
-        # classes = self.classes_["partition"]
-        # X = self.classes_.drop(columns= "partition")
         return silhouette_score(
             X,
             labels= self.classes_,
@@ -78,29 +60,20 @@ class ScLeiden(skbase.ClassifierMixin, skbase.BaseEstimator):
         
 
 if __name__ == "__main__":
-    import rmm
-    from rmm.allocators.cupy import rmm_cupy_allocator
     import argparse
     import pathlib
-    from tempfile import TemporaryDirectory
     import joblib
     from typing import Tuple
     from dask.distributed import Client
     from dask_cuda import LocalCUDACluster
-    import zarr
     import cudf as cdf
     import dask
-    import dask.dataframe as dd
-    import dask_ml.model_selection as dms
-    import sys
-    import sklearn
     import itertools
 
     dask.config.set({
         "array.backend": "cupy",
         "dataframe.backend": "cudf",
         })
-    # sklearn.set_config(array_api_dispatch= True)
 
 
     rng = np.random.default_rng(0)
@@ -182,31 +155,25 @@ if __name__ == "__main__":
     cluster = LocalCUDACluster(
         protocol= "ucx",
         enable_infiniband= True,
-        # enable_tcp_over_ucx= True,
-        # enable_rdmacm= True,
         rmm_pool_size= args.mem,
         rmm_allocator_external_lib_list= ["cupy"],
-        # rmm_async= True,
     )
     client = Client(
         cluster,
     )   
 
-# %%
-    # if args.transpose:
-    #     merged_data = cdf.read_parquet(
-    #             args.anndata,
-    #         ).astype("float32").T.values
-    # else:
-    #     merged_data = cdf.read_parquet(
-    #             args.anndata,
-    #         ).astype("float32").values
-    
-
     print("fitting gridsearch")
 
-    n_components = np.linspace(*args.comp_limits, 21, dtype= int)
-    n_neighbors = np.linspace(*args.nn_limits, 21, dtype= int)
+    n_components = np.linspace(
+        *args.comp_limits, 
+        args.comp_limits[1] - args.comp_limits[0] + 1, 
+        dtype= int
+    )
+    n_neighbors = np.linspace(
+        *args.nn_limits, 
+        args.nn_limits[1] - args.nn_limits[0] + 1, 
+        dtype= int
+    )
     resolution = np.linspace(*args.res_limits, 21)
 
 # %%
