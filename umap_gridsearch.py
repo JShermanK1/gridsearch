@@ -4,8 +4,6 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
-import seaborn as sns
-import sklearn.base as skbase
 from cuml.metrics.cluster import silhouette_score
 from cuml.decomposition import (PCA, IncrementalPCA)
 from cuml.neighbors import NearestNeighbors
@@ -55,7 +53,7 @@ class ScLeiden(skbase.ClassifierMixin, skbase.BaseEstimator):
         return silhouette_score(
             X,
             labels= self.classes_,
-        ) * cp.log10(X.shape[1])
+        ) * cp.log(X.shape[1])
 
         
 
@@ -63,7 +61,6 @@ if __name__ == "__main__":
     import argparse
     import pathlib
     import joblib
-    from typing import Tuple
     from dask.distributed import Client
     from dask_cuda import LocalCUDACluster
     import cudf as cdf
@@ -80,77 +77,87 @@ if __name__ == "__main__":
 
 # %%
 
-    os.makedirs(
-        "figures",
-        exist_ok= True,
-    )
-    os.makedirs(
-        "pickles",
-        exist_ok= True,
-    )
-    os.makedirs(
-        "data",
-        exist_ok= True,
-    )
     sns.set_style("whitegrid")
 
     apr = argparse.ArgumentParser(
-        description= "Gridsearch for clustering arugments that optimize silhouette score",
+        description= """
+        Gridsearch for clustering arugments that optimize adjusted silhouette score.
+        VRAM requirements scale very quickly with number of features and number of observations.
+        It is recommended to filter down to a number of highly variable features that will fit in memory for your device.
+        Approximately 100,000 obs x 5,000 features will fit in 40G of VRAM.
+        """,
     )
     apr.add_argument(
-        "--anndata", "-a",
+        "--input", "-i",
         type= pathlib.Path,
         required= True,
-        help= "input annotated dataframe"
+        help= """
+        Required:     
+        A parquet of observations x variables.
+        """
     )
     apr.add_argument(
-        "--prefix", "-p",
-        type= str,
-        default= "",
-        help= "prefix for outputs",
+        "--output", "-o",
+        type= pathlib.Path,
+        required= True,
+        help= """
+        Required:     
+        Path for output parquet. A long form parquet with columns for the number of PCA components, number of nearest neighbors, resolution and resulting score.
+        """,
     )
-    def range_input(string: str) -> Tuple[float, float]:
-        """
-        converts string of comma seperated floats into a tuple to set gridsearch params
-        """
-        range_tuple = tuple([float(val) for val in string.replace(" ", "").split(",")])
-        assert len(range_tuple) == 2
-        return range_tuple
-
     apr.add_argument(
         "--res_limits", "-r",
         type= float,
         nargs= 2,
         default= [0.5, 1.5],
+        help= """
+        Default 0.5 1.5:    
+        Two space seperated values for the lower and upper limits for resolutions. 21 evenly spaced values (inclusive) are tested
+        """,
     )
     apr.add_argument(
         "--nn_limits", "-n",
         type= int,
         nargs= 2,
         default= [20, 40],
+        help= """
+        Default 20 40:    
+        Two space seperated values for the lower and upper limits for nearest neighbors to test.
+        """,
     )
     apr.add_argument(
         "--comp_limits", "-c",
         type= int,
         nargs= 2,
         default= [15, 35],
+        help= """
+        Default 15 35:    
+        Two space seperated values for the lower and upper limits for number of PCA components to test.
+        """,
     )
     apr.add_argument(
         "--mem", "-m",
         type= str,
         default= "12G",
-        help= "Size of RMM pool allocation for each gpu",
+        help= """
+        Default 12G:    
+        Initial size of RMM pool allocation for each gpu. The pool may increase past this if necessary.
+        """,
     )
     apr.add_argument(
         "--transpose", "-t",
         action= "store_true",
+        help= "Transpose the parquet before testing",
     )
 
     args = apr.parse_args()
-    if args.prefix:
-        args.prefix += "-"
-
 # %%
+    args.input.resolve(strict= True)
+
+    os.makedirs(
+        args.output.resolve().parent,
+        exist_ok= True,
+    )
 
     cluster = LocalCUDACluster(
         protocol= "ucx",
@@ -166,12 +173,12 @@ if __name__ == "__main__":
 
     n_components = np.linspace(
         *args.comp_limits, 
-        args.comp_limits[1] - args.comp_limits[0] + 1, 
+        np.abs(args.comp_limits[1] - args.comp_limits[0]) + 1, 
         dtype= int
     )
     n_neighbors = np.linspace(
         *args.nn_limits, 
-        args.nn_limits[1] - args.nn_limits[0] + 1, 
+        np.abs(args.nn_limits[1] - args.nn_limits[0]) + 1, 
         dtype= int
     )
     resolution = np.linspace(*args.res_limits, 21)
@@ -215,7 +222,7 @@ if __name__ == "__main__":
 
     with joblib.parallel_backend("dask"):
         result = joblib.Parallel(verbose= 100)(
-            joblib.delayed(score)(params, args.anndata) for params in grid
+            joblib.delayed(score)(params, args.input) for params in grid
         )
 
     result = np.array([
@@ -233,6 +240,6 @@ if __name__ == "__main__":
         name= "score"
     ).to_frame(
     ).reset_index(
-    ).to_parquet(f"pickles/{args.prefix}dask.parquet")
+    ).to_parquet(args.output)
     print("made parquet")
     # %%
