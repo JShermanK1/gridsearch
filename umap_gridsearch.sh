@@ -1,6 +1,6 @@
 #! /bin/bash
 
 eval "$(conda shell.bash hook)"
-conda activate rapids_singlecell
+conda activate gridsearch
 python scripts/umap_gridsearch.py \
 "$@"

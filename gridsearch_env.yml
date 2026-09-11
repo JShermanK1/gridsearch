@@ -1,0 +1,17 @@
+name: rapids_singlecell
+channels:
+  - conda-forge
+  - bioconda
+  - rapidsai
+dependencies:
+  - numpy
+  - pandas
+  - python
+  - cudf
+  - cugraph
+  - dask-cudf
+  - cupy
+  - cuml
+  - joblib
+  - dask-cuda
+  - dask
