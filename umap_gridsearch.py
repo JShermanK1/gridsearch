@@ -10,6 +10,7 @@ from cuml.neighbors import NearestNeighbors
 import cugraph as cg
 import cupy as cp
 from cudf import DataFrame
+from sklearn import base as skbase
 
 
 
@@ -77,7 +78,6 @@ if __name__ == "__main__":
 
 # %%
 
-    sns.set_style("whitegrid")
 
     apr = argparse.ArgumentParser(
         description= """
@@ -102,7 +102,7 @@ if __name__ == "__main__":
         required= True,
         help= """
         Required:     
-        Path for output parquet. A long form parquet with columns for the number of PCA components, number of nearest neighbors, resolution and resulting score.
+        File path for output parquet. A long form parquet with columns for the number of PCA components, number of nearest neighbors, resolution and resulting score.
         """,
     )
     apr.add_argument(
@@ -159,15 +159,6 @@ if __name__ == "__main__":
         exist_ok= True,
     )
 
-    cluster = LocalCUDACluster(
-        protocol= "ucx",
-        enable_infiniband= True,
-        rmm_pool_size= args.mem,
-        rmm_allocator_external_lib_list= ["cupy"],
-    )
-    client = Client(
-        cluster,
-    )   
 
     print("fitting gridsearch")
 
@@ -220,14 +211,22 @@ if __name__ == "__main__":
                 scores[i, j] = scleid.score(X_pca)
         return scores
 
-    with joblib.parallel_backend("dask"):
-        result = joblib.Parallel(verbose= 100)(
-            joblib.delayed(score)(params, args.input) for params in grid
-        )
+    with LocalCUDACluster(
+        protocol= "ucx",
+        enable_infiniband= True,
+        rmm_pool_size= args.mem,
+        rmm_allocator_external_lib_list= ["cupy"],
+    ) as cluster, Client(cluster)  as client: 
 
-    result = np.array([
-        arr.get() for arr in result
-    ])
+        with joblib.parallel_backend("dask"):
+            result = joblib.Parallel(verbose= 100)(
+                joblib.delayed(score)(params, args.input) for params in grid
+            )
+
+        result = np.array([
+            arr.get() for arr in result
+        ])
+
     print("got result")
     idx = pd.MultiIndex.from_product(
         [n_components, n_neighbors, resolution],

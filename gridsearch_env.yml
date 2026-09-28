@@ -1,9 +1,10 @@
-name: rapids_singlecell
+name: gridsearch
 channels:
-  - conda-forge
-  - bioconda
   - rapidsai
+  - bioconda
+  - conda-forge
 dependencies:
+  - cuda-version=12
   - numpy
   - pandas
   - python
@@ -15,3 +16,4 @@ dependencies:
   - joblib
   - dask-cuda
   - dask
+  - scikit-learn
